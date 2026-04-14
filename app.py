@@ -154,7 +154,8 @@ def pagina_validacion():
             st.divider()
             if conflictos:
                 vistos = set()
-                for c in conflictos:
+                # Usamos enumerate para tener un índice único 'i'
+                for i, c in enumerate(conflictos):
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
@@ -165,7 +166,8 @@ def pagina_validacion():
                                 st.markdown(f"#### ⚠️ {c['campo']}")
                                 st.caption(f"DB actual -> F11: {c['c11']} | F7: {c['c7']} (Conflicto a las {c['hora']})")
                             with col_btn:
-                                if st.button("📝 Ajustar Campo", key=f"ed_{c['campo']}_{c['hora']}"):
+                                # AÑADIMOS EL ÍNDICE 'i' A LA KEY PARA QUE SEA ÚNICA
+                                if st.button("📝 Ajustar Campo", key=f"ed_{c['campo']}_{c['hora']}_{i}"):
                                     editar_campo_dialog(c['campo'], c['c11'], c['c7'])
                             
                             for p in c['activos']:
