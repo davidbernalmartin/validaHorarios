@@ -3,31 +3,34 @@ import pandas as pd
 from datetime import timedelta
 from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE CONEXIÓN ---
-# Asegúrate de que estos valores son correctos
+# --- CONFIGURACIÓN DE CONEXIÓN SEGURA ---
 SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-st.set_page_config(page_title="Gestor de Sedes Pro", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="Gestor de Instalaciones ⚽", layout="wide")
+
+# --- ESTILOS CSS ---
+st.markdown("""
+    <style>
+    .conflict-card { background-color: #fdf2f2; border-left: 5px solid #ff4b4b; padding: 20px; border-radius: 10px; margin-bottom: 15px; }
+    .match-info { font-size: 14px; margin: 8px 0; padding: 8px; background-color: white; border-radius: 5px; border-left: 3px solid #ffcccc; }
+    .badge-f11 { background: #1f77b4; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+    .badge-f7 { background: #2ca02c; color: white; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
+    </style>
+""", unsafe_allow_html=True)
 
 # --- FUNCIONES DE BASE DE DATOS ---
 
 def obtener_datos_campos():
     try:
         res = supabase.table("campos").select("*").execute()
-        df = pd.DataFrame(res.data)
-        if df.empty:
-            # Si la tabla existe pero está vacía, devolvemos estructura base
-            return pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7'])
-        return df
-    except Exception as e:
-        st.warning(f"Nota: No se pudieron cargar datos previos (posible tabla vacía).")
+        return pd.DataFrame(res.data)
+    except Exception:
         return pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7'])
 
 def upsert_campos(df_editado):
     for _, fila in df_editado.iterrows():
-        # Limpieza de datos antes de enviar a Supabase
         data = {
             "nombre": str(fila['nombre']).strip(),
             "capacidad_f11": int(fila['capacidad_f11']),
@@ -35,61 +38,137 @@ def upsert_campos(df_editado):
         }
         supabase.table("campos").upsert(data, on_conflict="nombre").execute()
 
-# --- INTERFAZ ---
-st.title("⚽ Validación de Instalaciones (F7/F11)")
+# --- PÁGINA 1: GESTIÓN DE CAMPOS ---
 
-archivo = st.file_uploader("Sube el CSV de Partidos", type=['csv'])
+def pagina_gestion():
+    st.title("🏟️ Gestión de Instalaciones")
+    st.write("Configura la capacidad máxima de cada campo en la base de datos de Supabase.")
+    
+    df_db = obtener_datos_campos()
+    
+    if df_db.empty:
+        st.info("La base de datos está vacía. Añade campos nuevos abajo.")
+        df_db = pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7'])
 
-if archivo:
-    try:
-        # 1. Carga de Partidos
+    # Editor para añadir o modificar
+    st.subheader("Listado de Campos")
+    df_editado = st.data_editor(
+        df_db[['nombre', 'capacidad_f11', 'capacidad_f7']],
+        num_rows="dynamic",
+        use_container_width=True,
+        hide_index=True,
+        key="editor_maestro"
+    )
+    
+    if st.button("💾 Guardar Cambios en la Nube"):
+        with st.spinner("Sincronizando..."):
+            upsert_campos(df_editado)
+            st.success("¡Base de datos actualizada correctamente!")
+            st.cache_data.clear()
+
+# --- PÁGINA 2: VALIDACIÓN ---
+
+def pagina_validacion():
+    st.title("🔍 Validación de Horarios")
+    
+    with st.sidebar:
+        st.header("Ajustes")
+        duracion = st.number_input("Duración partido (min):", value=105)
+    
+    archivo = st.file_uploader("Sube el CSV de Partidos", type=['csv'])
+    
+    if archivo:
         try:
-            df_partidos = pd.read_csv(archivo, sep=';', encoding='utf-8')
-        except UnicodeDecodeError:
-            archivo.seek(0)
-            df_partidos = pd.read_csv(archivo, sep=';', encoding='latin-1')
-
-        # Limpiar nombres de columnas del CSV (por si hay espacios)
-        df_partidos.columns = df_partidos.columns.str.strip()
-        df_partidos['Campo'] = df_partidos['Campo'].astype(str).str.strip()
-        campos_csv = sorted(df_partidos['Campo'].unique())
-
-        # 2. Sincronización con Supabase
-        st.subheader("🏟️ Configuración de Campos Detectados")
-        
-        df_db = obtener_datos_campos()
-        
-        # Crear la tabla de la interfaz asegurando que existen las columnas
-        df_interfaz = pd.DataFrame({'nombre': campos_csv})
-        
-        if not df_db.empty:
-            # Unimos solo si hay datos, si no, Pandas creará las columnas con NaN
-            df_interfaz = pd.merge(df_interfaz, df_db[['nombre', 'capacidad_f11', 'capacidad_f7']], on='nombre', how='left')
-        else:
-            df_interfaz['capacidad_f11'] = 1
-            df_interfaz['capacidad_f7'] = 2
-
-        # Asegurar que las columnas existen y no tienen fallos de tipo
-        for col in ['capacidad_f11', 'capacidad_f7']:
-            if col not in df_interfaz.columns:
-                df_interfaz[col] = 1 if col == 'capacidad_f11' else 2
-            df_interfaz[col] = df_interfaz[col].fillna(1 if col == 'capacidad_f11' else 2).astype(int)
-
-        with st.expander("⚙️ Editar capacidades F11 / F7", expanded=False):
-            df_final_campos = st.data_editor(
-                df_interfaz[['nombre', 'capacidad_f11', 'capacidad_f7']],
-                use_container_width=True,
-                hide_index=True,
-                disabled=["nombre"]
-            )
+            # Carga de datos
+            try:
+                df_raw = pd.read_csv(archivo, sep=';', encoding='utf-8')
+            except UnicodeDecodeError:
+                archivo.seek(0)
+                df_raw = pd.read_csv(archivo, sep=';', encoding='latin-1')
             
-            if st.button("💾 Guardar cambios en Supabase"):
-                with st.spinner("Guardando en la nube..."):
-                    upsert_campos(df_final_campos)
-                    st.success("¡Base de datos actualizada!")
-                    st.rerun()
+            df_raw.columns = df_raw.columns.str.strip()
+            df_raw['Campo'] = df_raw['Campo'].astype(str).str.strip()
+            
+            # Traer capacidades de Supabase
+            df_db = obtener_datos_campos()
+            if df_db.empty:
+                st.error("⚠️ No hay campos configurados en la base de datos. Ve a la página de Gestión.")
+                return
 
-        st.info("Configuración cargada correctamente. Listo para procesar la lógica F7/F11.")
+            # Lógica de validación (El F11 ocupa todo el espacio)
+            df_validar = pd.merge(df_raw, df_db, left_on='Campo', right_on='nombre', how='left')
+            df_validar['Inicio'] = pd.to_datetime(df_validar['Fecha'] + ' ' + df_validar['Hora'], dayfirst=True, errors='coerce')
+            df_validar = df_validar.dropna(subset=['Inicio'])
+            df_validar['Fin'] = df_validar['Inicio'] + timedelta(minutes=duracion)
 
-    except Exception as e:
-        st.error(f"Error detallado: {e}")
+            conflictos = []
+            campos_en_juego = df_validar['Campo'].unique()
+
+            for campo in campos_en_juego:
+                df_campo = df_validar[df_validar['Campo'] == campo]
+                # Obtenemos capacidad máxima (la lógica asume que 1 F11 bloquea el campo completo)
+                cap_f11_max = int(df_db.loc[df_db['nombre'] == campo, 'capacidad_f11'].values[0])
+                cap_f7_max = int(df_db.loc[df_db['nombre'] == campo, 'capacidad_f7'].values[0])
+
+                eventos = []
+                for _, p in df_campo.iterrows():
+                    eventos.append((p['Inicio'], 1, p))
+                    eventos.append((p['Fin'], -1, p))
+                
+                eventos.sort(key=lambda x: (x[0], x[1]))
+                
+                activos = []
+                for tiempo, tipo, p_data in eventos:
+                    if tipo == 1: activos.append(p_data)
+                    else: 
+                        id_p = str(p_data.get('Código Partido', ''))
+                        activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
+
+                    # CONTEO POR TIPO
+                    n_f11 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F11'])
+                    n_f7 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F7'])
+
+                    # REGLA DE VALIDACIÓN:
+                    # 1 F11 ocupa el 100% de la capacidad de F11 y de F7.
+                    # Si n_f11 >= 1, no puede haber nada más.
+                    # Si n_f11 == 0, n_f7 no puede superar cap_f7_max.
+                    conflicto = False
+                    if n_f11 > cap_f11_max: conflicto = True
+                    if n_f11 >= 1 and n_f7 > 0: conflicto = True
+                    if n_f11 == 0 and n_f7 > cap_f7_max: conflicto = True
+
+                    if conflicto:
+                        conflictos.append({
+                            "campo": campo,
+                            "hora": tiempo.strftime('%H:%M'),
+                            "activos": list(activos)
+                        })
+
+            # Mostrar tarjetas
+            if conflictos:
+                st.error("Se han detectado colisiones de espacio:")
+                vistos = set()
+                for c in conflictos:
+                    ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
+                    if ids not in vistos:
+                        vistos.add(ids)
+                        partidos_html = "".join([f"<div class='match-info'><b>{p['Hora']}</b> - {p['Equipo Casa']} vs {p['Equipo Visitante']} <span class='badge-{str(p['Tipo']).lower()}'>{p['Tipo']}</span></div>" for p in c['activos']])
+                        st.markdown(f"""
+                            <div class="conflict-card">
+                                <div class="card-title">⚠️ {c['campo']} (Tramo {c['hora']})</div>
+                                {partidos_html}
+                            </div>
+                        """, unsafe_allow_html=True)
+            else:
+                st.success("✅ Todo correcto: Las asignaciones respetan las capacidades F7/F11.")
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# --- NAVEGACIÓN ---
+
+pg = st.navigation([
+    st.Page(pagina_validacion, title="Validador de Partidos", icon="🔍"),
+    st.Page(pagina_gestion, title="Gestión de Campos", icon="🏟️"),
+])
+pg.run()
