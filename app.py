@@ -42,29 +42,75 @@ def upsert_campos(df_editado):
 
 def pagina_gestion():
     st.title("🏟️ Gestión de Instalaciones")
-    st.write("Configura la capacidad máxima de cada campo en la base de datos de Supabase.")
+    st.write("Sincroniza los campos del CSV con la base de datos de Supabase.")
     
+    # 1. Cargamos lo que ya tenemos en Supabase
     df_db = obtener_datos_campos()
     
-    if df_db.empty:
-        st.info("La base de datos está vacía. Añade campos nuevos abajo.")
-        df_db = pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7'])
+    # 2. Subida de archivo para ESCANEAR nuevos campos
+    with st.expander("📥 Importar campos nuevos desde CSV", expanded=True):
+        archivo_scan = st.file_uploader("Sube el CSV para buscar campos nuevos", type=['csv'], key="scanner")
+        
+        if archivo_scan:
+            try:
+                # Lectura rápida del CSV
+                df_temp = pd.read_csv(archivo_scan, sep=';', encoding='latin-1')
+                df_temp.columns = df_temp.columns.str.strip()
+                campos_en_csv = set(df_temp['Campo'].dropna().astype(str).str.strip().unique())
+                
+                # Campos que ya existen en DB
+                campos_en_db = set(df_db['nombre'].unique()) if not df_db.empty else set()
+                
+                # Detectamos los que faltan
+                nuevos_campos = campos_en_csv - campos_en_db
+                
+                if nuevos_campos:
+                    st.warning(f"Se han detectado {len(nuevos_campos)} campos nuevos.")
+                    if st.button("➕ Añadir nuevos a la lista con F11:0 y F7:1"):
+                        # Creamos los nuevos registros
+                        registros_nuevos = []
+                        for nombre in nuevos_campos:
+                            registros_nuevos.append({
+                                "nombre": nombre,
+                                "capacidad_f11": 0,
+                                "capacidad_f7": 1
+                            })
+                        
+                        # Los subimos a Supabase
+                        with st.spinner("Registrando nuevos campos..."):
+                            for reg in registros_nuevos:
+                                supabase.table("campos").insert(reg).execute()
+                            st.success("Campos añadidos. Refrescando...")
+                            st.cache_data.clear()
+                            st.rerun()
+                else:
+                    st.success("✅ Todos los campos de este CSV ya están registrados en la base de datos.")
+            except Exception as e:
+                st.error(f"Error al escanear: {e}")
 
-    # Editor para añadir o modificar
-    st.subheader("Listado de Campos")
-    df_editado = st.data_editor(
-        df_db[['nombre', 'capacidad_f11', 'capacidad_f7']],
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        key="editor_maestro"
-    )
+    # 3. Listado y Edición Manual
+    st.subheader("📋 Listado Maestro de Campos")
+    st.info("Aquí puedes ajustar las capacidades finales de cada campo.")
     
-    if st.button("💾 Guardar Cambios en la Nube"):
-        with st.spinner("Sincronizando..."):
-            upsert_campos(df_editado)
-            st.success("¡Base de datos actualizada correctamente!")
-            st.cache_data.clear()
+    # Refrescamos df_db por si acabamos de insertar
+    df_db = obtener_datos_campos()
+    
+    if not df_db.empty:
+        df_editado = st.data_editor(
+            df_db[['nombre', 'capacidad_f11', 'capacidad_f7']],
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            key="editor_maestro"
+        )
+        
+        if st.button("💾 Guardar Cambios Manuales"):
+            with st.spinner("Sincronizando..."):
+                upsert_campos(df_editado)
+                st.success("¡Base de datos actualizada!")
+                st.cache_data.clear()
+    else:
+        st.write("No hay campos registrados todavía.")
 
 # --- PÁGINA 2: VALIDACIÓN ---
 
