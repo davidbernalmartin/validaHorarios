@@ -3,9 +3,8 @@ import pandas as pd
 from datetime import timedelta
 from supabase import create_client, Client
 
-# --- CONFIGURACIÓN DE CONEXIÓN ---
-SUPABASE_URL = "https://kmoisrouwjxpzqngqryu.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imttb2lzcm91d2p4cHpxbmdxcnl1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYxNjQwNjYsImV4cCI6MjA5MTc0MDA2Nn0.2XasZwY54wKxOH_tzgcKzCqZUqy--PA8XsBxZACIkug"
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 st.set_page_config(page_title="Gestor de Sedes Supabase", page_icon="⚽", layout="wide")
