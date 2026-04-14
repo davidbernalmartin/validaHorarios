@@ -114,6 +114,25 @@ def pagina_gestion():
 
 # --- PÁGINA 2: VALIDACIÓN ---
 
+# --- DIÁLOGO PARA AÑADIR CAMPO ---
+@st.dialog("Configurar Nuevo Campo")
+def modal_nuevo_campo(nombre_campo):
+    st.write(f"Estás configurando el campo: **{nombre_campo}**")
+    c11 = st.number_input("Capacidad Fútbol 11", min_value=0, value=0)
+    c7 = st.number_input("Capacidad Fútbol 7", min_value=0, value=1)
+    
+    if st.button("Guardar en Base de Datos"):
+        data = {
+            "nombre": nombre_campo,
+            "capacidad_f11": c11,
+            "capacidad_f7": c7
+        }
+        supabase.table("campos").upsert(data, on_conflict="nombre").execute()
+        st.success(f"Campo '{nombre_campo}' guardado.")
+        st.cache_data.clear()
+        st.rerun()
+
+# --- PÁGINA 2: VALIDACIÓN ---
 def pagina_validacion():
     st.title("🔍 Validación de Horarios")
     
@@ -135,26 +154,44 @@ def pagina_validacion():
             df_raw.columns = df_raw.columns.str.strip()
             df_raw['Campo'] = df_raw['Campo'].astype(str).str.strip()
             
-            # Traer capacidades de Supabase
+            # 1. Obtener campos de Supabase
             df_db = obtener_datos_campos()
-            if df_db.empty:
-                st.error("⚠️ No hay campos configurados en la base de datos. Ve a la página de Gestión.")
+            campos_conocidos = set(df_db['nombre'].unique()) if not df_db.empty else set()
+            campos_en_csv = set(df_raw['Campo'].unique())
+            
+            # 2. Detectar campos desconocidos
+            desconocidos = campos_en_csv - campos_conocidos
+            
+            if desconocidos:
+                st.warning(f"⚠️ Se han detectado {len(desconocidos)} campos que no están en la Base de Datos.")
+                cols = st.columns(len(desconocidos) if len(desconocidos) < 4 else 4)
+                for i, campo in enumerate(desconocidos):
+                    with cols[i % 4]:
+                        if st.button(f"Configurar {campo}", key=f"btn_{campo}"):
+                            modal_nuevo_campo(campo)
+                st.divider()
+
+            # 3. Proceder con la validación solo de los campos conocidos
+            # Filtramos el CSV para validar solo lo que tenemos en DB
+            df_validar_raw = df_raw[df_raw['Campo'].isin(campos_conocidos)].copy()
+            
+            if df_validar_raw.empty:
+                st.info("Configura los campos desconocidos para ver los solapamientos.")
                 return
 
-            # Lógica de validación (El F11 ocupa todo el espacio)
-            df_validar = pd.merge(df_raw, df_db, left_on='Campo', right_on='nombre', how='left')
+            # Unimos con capacidades
+            df_validar = pd.merge(df_validar_raw, df_db, left_on='Campo', right_on='nombre', how='left')
             df_validar['Inicio'] = pd.to_datetime(df_validar['Fecha'] + ' ' + df_validar['Hora'], dayfirst=True, errors='coerce')
             df_validar = df_validar.dropna(subset=['Inicio'])
             df_validar['Fin'] = df_validar['Inicio'] + timedelta(minutes=duracion)
 
+            # --- LÓGICA DE VALIDACIÓN ---
             conflictos = []
-            campos_en_juego = df_validar['Campo'].unique()
-
-            for campo in campos_en_juego:
+            for campo in df_validar['Campo'].unique():
                 df_campo = df_validar[df_validar['Campo'] == campo]
-                # Obtenemos capacidad máxima (la lógica asume que 1 F11 bloquea el campo completo)
-                cap_f11_max = int(df_db.loc[df_db['nombre'] == campo, 'capacidad_f11'].values[0])
-                cap_f7_max = int(df_db.loc[df_db['nombre'] == campo, 'capacidad_f7'].values[0])
+                row_db = df_db[df_db['nombre'] == campo].iloc[0]
+                cap_f11_max = int(row_db['capacidad_f11'])
+                cap_f7_max = int(row_db['capacidad_f7'])
 
                 eventos = []
                 for _, p in df_campo.iterrows():
@@ -170,35 +207,26 @@ def pagina_validacion():
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
-                    # CONTEO POR TIPO
                     n_f11 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F11'])
                     n_f7 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F7'])
 
-                    # REGLA DE VALIDACIÓN:
-                    # 1 F11 ocupa el 100% de la capacidad de F11 y de F7.
-                    # Si n_f11 >= 1, no puede haber nada más.
-                    # Si n_f11 == 0, n_f7 no puede superar cap_f7_max.
                     conflicto = False
                     if n_f11 > cap_f11_max: conflicto = True
                     if n_f11 >= 1 and n_f7 > 0: conflicto = True
                     if n_f11 == 0 and n_f7 > cap_f7_max: conflicto = True
 
                     if conflicto:
-                        conflictos.append({
-                            "campo": campo,
-                            "hora": tiempo.strftime('%H:%M'),
-                            "activos": list(activos)
-                        })
+                        conflictos.append({"campo": campo, "hora": tiempo.strftime('%H:%M'), "activos": list(activos)})
 
-            # Mostrar tarjetas
+            # 4. Mostrar Resultados
+            st.subheader("🔍 Resultados del Análisis")
             if conflictos:
-                st.error("Se han detectado colisiones de espacio:")
                 vistos = set()
                 for c in conflictos:
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if ids not in vistos:
                         vistos.add(ids)
-                        partidos_html = "".join([f"<div class='match-info'><b>{p['Hora']}</b> - {p['Equipo Casa']} vs {p['Equipo Visitante']} <span class='badge-{str(p['Tipo']).lower()}'>{p['Tipo']}</span></div>" for p in c['activos']])
+                        partidos_html = "".join([f"<div class='match-info'><span class='code-badge'>{p.get('Código Partido', 'S/C')}</span> <b>{p['Hora']}</b> - {p['Equipo Casa']} vs {p['Equipo Visitante']} <span class='badge-{str(p['Tipo']).lower()}'>{p['Tipo']}</span></div>" for p in c['activos']])
                         st.markdown(f"""
                             <div class="conflict-card">
                                 <div class="card-title">⚠️ {c['campo']} (Tramo {c['hora']})</div>
@@ -206,7 +234,7 @@ def pagina_validacion():
                             </div>
                         """, unsafe_allow_html=True)
             else:
-                st.success("✅ Todo correcto: Las asignaciones respetan las capacidades F7/F11.")
+                st.success("✅ Validación completada: Sin conflictos en los campos conocidos.")
 
         except Exception as e:
             st.error(f"Error: {e}")
