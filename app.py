@@ -73,27 +73,21 @@ def editar_campo_dialog(nombre_campo, c11_actual=0, c7_actual=0):
         st.success("¡Datos actualizados!")
         st.rerun()
 
-# --- 5. PÁGINA: VALIDACIÓN DE PARTIDOS ---
-
+# --- 5. PÁGINA: VALIDACIÓN DE PARTIDOS (ACTUALIZADA CON CONTRASTE Y EXPANDERS) ---
 def pagina_validacion():
     st.title("🔍 Validación de Horarios y Solapamientos")
     
     with st.sidebar:
         st.header("⚙️ Parámetros")
-        tipo_fichero = st.radio(
-            "Tipo de partidos en este fichero:",
-            ["F11", "F7"],
-            help="Forzará a todos los partidos del CSV a este tipo para la validación."
-        )
+        tipo_fichero = st.radio("Tipo de partidos:", ["F11", "F7"])
         st.divider()
-        duracion = st.number_input("Duración partido (min):", min_value=1, value=105, step=5)
-        st.caption("v3.0 - Supabase Cloud Sync")
+        duracion = st.number_input("Duración partido (min):", min_value=1, value=105)
 
     archivo = st.file_uploader(f"Sube el CSV de partidos ({tipo_fichero})", type=['csv'])
     
     if archivo:
         try:
-            # Lectura del CSV
+            # Lectura del CSV (omito la parte de carga por brevedad, es igual a la anterior)
             try:
                 df_raw = pd.read_csv(archivo, sep=';', encoding='utf-8')
             except UnicodeDecodeError:
@@ -102,28 +96,21 @@ def pagina_validacion():
             
             df_raw.columns = df_raw.columns.str.strip()
             df_raw['Campo'] = df_raw['Campo'].astype(str).str.strip()
-            # Forzamos el tipo elegido en el sidebar
             df_raw['Tipo'] = tipo_fichero 
             
-            # Cruce con Supabase
             df_db = obtener_datos_campos()
             df_merge = pd.merge(df_raw, df_db, left_on='Campo', right_on='nombre', how='left')
-            
-            # Campos desconocidos = Capacidad 0
             df_merge['capacidad_f11'] = df_merge['capacidad_f11'].fillna(0)
             df_merge['capacidad_f7'] = df_merge['capacidad_f7'].fillna(0)
-            
-            # Tiempos
             df_merge['Inicio'] = pd.to_datetime(df_merge['Fecha'] + ' ' + df_merge['Hora'], dayfirst=True, errors='coerce')
             df_merge = df_merge.dropna(subset=['Inicio'])
             df_merge['Fin'] = df_merge['Inicio'] + timedelta(minutes=duracion)
 
-            # Lógica de detección
+            # --- Lógica de detección de conflictos ---
             conflictos = []
             for campo in df_merge['Campo'].unique():
                 df_c = df_merge[df_merge['Campo'] == campo]
-                c11_max = int(df_c['capacidad_f11'].iloc[0])
-                c7_max = int(df_c['capacidad_f7'].iloc[0])
+                c11_max, c7_max = int(df_c['capacidad_f11'].iloc[0]), int(df_c['capacidad_f7'].iloc[0])
                 
                 eventos = []
                 for _, p in df_c.iterrows():
@@ -131,7 +118,6 @@ def pagina_validacion():
                     eventos.append((p['Fin'], -1, p))
                 
                 eventos.sort(key=lambda x: (x[0], x[1]))
-                
                 activos = []
                 for tiempo, tipo, p_data in eventos:
                     if tipo == 1: activos.append(p_data)
@@ -142,49 +128,47 @@ def pagina_validacion():
                     n_f11 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F11'])
                     n_f7 = len([p for p in activos if str(p.get('Tipo')).upper() == 'F7'])
 
-                    es_conflicto = False
-                    if n_f11 > c11_max: es_conflicto = True
-                    if n_f11 >= 1 and n_f7 > 0: es_conflicto = True
-                    if n_f11 == 0 and n_f7 > c7_max: es_conflicto = True
-                    
-                    if es_conflicto and len(activos) > 0:
-                        conflictos.append({"campo": campo, "c11": c11_max, "c7": c7_max, "hora": tiempo.strftime('%H:%M'), "activos": list(activos)})
+                    if (n_f11 > c11_max) or (n_f11 >= 1 and n_f7 > 0) or (n_f11 == 0 and n_f7 > c7_max):
+                        if len(activos) > 0:
+                            conflictos.append({"campo": campo, "c11": c11_max, "c7": c7_max, "hora": tiempo.strftime('%H:%M'), "activos": list(activos)})
 
-            # Renderizado
-            st.divider()
+            # --- RENDERIZADO CON EXPANDERS Y CONTRASTE ---
+            st.subheader("Análisis de Capacidades")
             if conflictos:
                 vistos = set()
-                # Usamos enumerate para tener un índice único 'i'
                 for i, c in enumerate(conflictos):
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
                         
-                        with st.container():
+                        # Título del expander con información clave
+                        titulo_error = f"⚠️ {c['campo']} | Bloqueo a las {c['hora']} (F11:{c['c11']} F7:{c['c7']})"
+                        
+                        with st.expander(titulo_error, expanded=False):
                             col_tit, col_btn = st.columns([0.8, 0.2])
                             with col_tit:
-                                st.markdown(f"#### ⚠️ {c['campo']}")
-                                st.caption(f"DB actual -> F11: {c['c11']} | F7: {c['c7']} (Conflicto a las {c['hora']})")
+                                st.write(f"Hay **{len(c['activos'])} partidos** coincidiendo en este tramo.")
                             with col_btn:
-                                # AÑADIMOS EL ÍNDICE 'i' A LA KEY PARA QUE SEA ÚNICA
-                                if st.button("📝 Ajustar Campo", key=f"ed_{c['campo']}_{c['hora']}_{i}"):
+                                if st.button("📝 Ajustar Campo", key=f"ed_{c['campo']}_{i}"):
                                     editar_campo_dialog(c['campo'], c['c11'], c['c7'])
                             
                             for p in c['activos']:
                                 badge = "badge-f11" if p['Tipo'] == "F11" else "badge-f7"
+                                # Estilo con fondo gris claro y texto oscuro para máximo contraste
                                 st.markdown(f"""
-                                    <div class='match-info'>
-                                        <span><span class='code-badge'>{p.get('Código Partido', 'S/C')}</span> <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}</span>
+                                    <div style="background-color: #f0f2f6; padding: 10px; border-radius: 8px; margin-bottom: 8px; border: 1px solid #d1d5db; display: flex; justify-content: space-between; align-items: center;">
+                                        <span style="color: #1f2937; font-weight: 500;">
+                                            <span class='code-badge' style="color: #4b5563;">{p.get('Código Partido', 'S/C')}</span> 
+                                            <b style="color: #000;">{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
+                                        </span>
                                         <span class='{badge}'>{p['Tipo']}</span>
                                     </div>
                                 """, unsafe_allow_html=True)
-                            st.markdown("<br>", unsafe_allow_html=True)
             else:
-                st.success(f"✅ Validación de {tipo_fichero} completada con éxito. Sin solapamientos.")
-                st.balloons()
+                st.success(f"✅ Sin conflictos en {tipo_fichero}.")
 
         except Exception as e:
-            st.error(f"Error al procesar el archivo: {e}")
+            st.error(f"Error: {e}")
 
 # --- 6. PÁGINA: MAESTRO DE CAMPOS ---
 
