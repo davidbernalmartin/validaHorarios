@@ -55,8 +55,6 @@ def modal_campo(nombre, c11=0, c7=0):
         guardar_campo(nombre, nc11, nc7)
         st.rerun()
 
-# --- 5. PÁGINA: VALIDACIÓN ---
-
 def pagina_validacion():
     st.title("🔍 Validación de Horarios Inteligente")
     
@@ -69,7 +67,7 @@ def pagina_validacion():
     
     if archivo:
         try:
-            # Carga de CSV y DB
+            # 1. Carga de datos
             df_db_campos = cargar_db("campos")
             df_db_cats = cargar_db("categorias")
             
@@ -79,70 +77,141 @@ def pagina_validacion():
                 archivo.seek(0)
                 df = pd.read_csv(archivo, sep=';', encoding='latin-1')
             
+            # Limpieza básica
             df.columns = df.columns.str.strip()
             df['Campo'] = df['Campo'].astype(str).str.strip()
             df['Tipo'] = tipo_global
 
-            # Función para calcular el fin según categoría
+            # 2. DETECCIÓN DE PARTIDOS INCOMPLETOS (Sin fecha o sin hora)
+            # Consideramos error si es NaN o si el texto es vacío/nan
+            df['Error_Horario'] = (
+                df['Fecha'].isna() | (df['Fecha'].astype(str).str.strip().lower() == 'nan') |
+                df['Hora'].isna() | (df['Hora'].astype(str).str.strip().lower() == 'nan')
+            )
+            
+            partidos_con_error = df[df['Error_Horario']].copy()
+
+            # 3. Función interna para calcular el fin de partido
             def obtener_fin(fila):
+                if fila['Error_Horario']: 
+                    return pd.NaT
+                
                 info_comp = normalizar_texto(fila.get('Competición', ''))
                 minutos = duracion_defecto
+                
+                # Buscamos si la competición coincide con alguna categoría guardada
                 for _, cat in df_db_cats.iterrows():
                     if normalizar_texto(cat['palabra_clave']) in info_comp:
                         minutos = cat['duracion_minutos']
                         break
-                inicio = pd.to_datetime(fila['Fecha'] + ' ' + fila['Hora'], dayfirst=True)
-                return inicio + timedelta(minutes=minutos)
+                
+                f_val = str(fila['Fecha']).strip()
+                h_val = str(fila['Hora']).strip()
+                
+                inicio = pd.to_datetime(f_val + ' ' + h_val, dayfirst=True, errors='coerce')
+                return inicio + timedelta(minutes=minutos) if pd.notna(inicio) else pd.NaT
 
-            # Preparar datos
+            # 4. Procesamiento y Cruce con Campos
             df_val = pd.merge(df, df_db_campos, left_on='Campo', right_on='nombre', how='left')
             df_val['capacidad_f11'] = df_val['capacidad_f11'].fillna(0)
             df_val['capacidad_f7'] = df_val['capacidad_f7'].fillna(0)
-            df_val['Inicio'] = pd.to_datetime(df_val['Fecha'] + ' ' + df_val['Hora'], dayfirst=True)
+            
+            # Calculamos tiempos
+            df_val['Inicio'] = pd.to_datetime(df_val['Fecha'].astype(str) + ' ' + df_val['Hora'].astype(str), dayfirst=True, errors='coerce')
             df_val['Fin'] = df_val.apply(obtener_fin, axis=1)
 
+            # 5. RENDERIZADO DE ALERTAS CRÍTICAS (Partidos sin horario)
+            if not partidos_con_error.empty:
+                with st.container():
+                    st.error(f"🚨 Se han detectado {len(partidos_con_error)} partidos con datos de horario incompletos:")
+                    for _, p in partidos_con_error.iterrows():
+                        st.warning(f"**ID: {p.get('Código Partido', 'S/C')}** | {p['Equipo Casa']} vs {p['Equipo Visitante']} (Campo: {p['Campo']})")
+                st.divider()
+
+            # Quitamos los errores del flujo principal para que no rompan el algoritmo de solapamientos
+            df_clean = df_val.dropna(subset=['Inicio', 'Fin']).copy()
+
+            # 6. ALGORITMO DE DETECCIÓN DE CONFLICTOS
             conflictos = []
-            for campo in df_val['Campo'].unique():
-                df_c = df_val[df_val['Campo'] == campo].sort_values('Inicio')
-                c11_m, c7_m = int(df_c['capacidad_f11'].iloc[0]), int(df_c['capacidad_f7'].iloc[0])
+            for campo in df_clean['Campo'].unique():
+                df_c = df_clean[df_clean['Campo'] == campo].sort_values('Inicio')
+                c11_m = int(df_c['capacidad_f11'].iloc[0])
+                c7_m = int(df_c['capacidad_f7'].iloc[0])
                 
                 eventos = []
                 for _, p in df_c.iterrows():
                     eventos.append((p['Inicio'], 1, p))
                     eventos.append((p['Fin'], -1, p))
+                
+                # Ordenar por tiempo; si el tiempo coincide, procesar salidas (-1) antes que entradas (1)
                 eventos.sort(key=lambda x: (x[0], x[1]))
                 
                 activos = []
                 for t, tipo, p_data in eventos:
-                    if tipo == 1: activos.append(p_data)
+                    if tipo == 1: 
+                        activos.append(p_data)
                     else:
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
+                    # Contadores actuales en el campo
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
 
-                    if (nf11 > c11_m) or (nf11 >= 1 and nf7 > 0) or (nf11 == 0 and nf7 > c7_m):
-                        if activos: conflictos.append({"campo": campo, "c11": c11_m, "c7": c7_m, "hora": t.strftime('%H:%M'), "activos": list(activos)})
+                    # Reglas de conflicto
+                    es_conflicto = False
+                    if (nf11 > c11_m): es_conflicto = True  # Supera F11
+                    elif (nf11 >= 1 and nf7 > 0): es_conflicto = True  # Mezcla F11 y F7
+                    elif (nf11 == 0 and nf7 > c7_m): es_conflicto = True  # Supera F7
+                    
+                    if es_conflicto and activos:
+                        conflictos.append({
+                            "campo": campo, 
+                            "c11": c11_m, 
+                            "c7": c7_m, 
+                            "hora": t.strftime('%H:%M'), 
+                            "activos": list(activos)
+                        })
 
-            # Renderizado
+            # 7. RENDERIZADO DE CONFLICTOS (Expanders con Contraste)
+            st.subheader("Análisis de Ocupación")
             if conflictos:
                 vistos = set()
                 for i, c in enumerate(conflictos):
+                    # Evitamos duplicar el mismo grupo de partidos en el mismo campo
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
-                        with st.expander(f"⚠️ {c['campo']} | Conflicto {c['hora']} (Capacidad F11:{c['c11']} F7:{c['c7']})", expanded=False):
-                            c1, c2 = st.columns([0.8, 0.2])
-                            c1.write(f"Solapamiento detectado entre {len(c['activos'])} partidos:")
-                            if c2.button("📝 Ajustar", key=f"btn_{i}"): modal_campo(c['campo'], c['c11'], c['c7'])
+                        
+                        titulo_expander = f"⚠️ {c['campo']} | Conflicto detectado a las {c['hora']}"
+                        
+                        with st.expander(titulo_expander, expanded=False):
+                            col_info, col_btn = st.columns([0.8, 0.2])
+                            with col_info:
+                                st.write(f"Capacidad DB -> **F11: {c['c11']}** | **F7: {c['c7']}**")
+                                st.write(f"Partidos solapados:")
+                            with col_btn:
+                                if st.button("📝 Ajustar Campo", key=f"btn_val_{i}"):
+                                    modal_campo(c['campo'], c['c11'], c['c7'])
+                            
                             for p in c['activos']:
-                                b = "badge-f11" if p['Tipo'] == "F11" else "badge-f7"
-                                st.markdown(f"<div class='match-box'><span class='match-text'><span class='code-badge'>{p.get('Código Partido','S/C')}</span><b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}</span><span class='{b}'>{p['Tipo']}</span></div>", unsafe_allow_html=True)
+                                badge_class = "badge-f11" if p['Tipo'] == "F11" else "badge-f7"
+                                st.markdown(f"""
+                                    <div class='match-box'>
+                                        <span class='match-text'>
+                                            <span class='code-badge'>{p.get('Código Partido','S/C')}</span>
+                                            <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
+                                        </span>
+                                        <span class='{badge_class}'>{p['Tipo']}</span>
+                                    </div>
+                                """, unsafe_allow_allow_html=True)
+            elif partidos_con_error.empty:
+                st.success("✅ Validación completada: Todos los partidos tienen horario y respetan la capacidad de los campos.")
             else:
-                st.success("✅ Todo correcto. Los horarios respetan las capacidades por categoría.")
+                st.info("No se detectaron solapamientos, pero revisa los partidos con errores de fecha/hora listados arriba.")
+
         except Exception as e:
-            st.error(f"Error procesando el archivo: {e}")
+            st.error(f"Error crítico en la validación: {e}")
 
 # --- 6. PÁGINA: GESTIÓN DE CAMPOS ---
 def pagina_campos():
