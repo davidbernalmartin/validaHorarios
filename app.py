@@ -100,7 +100,7 @@ def pagina_validacion():
                 minutos = duracion_defecto
                 
                 for _, cat in df_db_cats.iterrows():
-                    if normalizar_texto(cat['palabra_clave']) in info_comp:
+                    if normalizar_texto(cat[' ', 'palabra_clave']) in info_comp:
                         minutos = cat['duracion_minutos']
                         break
                 
