@@ -82,11 +82,11 @@ def pagina_validacion():
             df['Campo'] = df['Campo'].astype(str).str.strip()
             df['Tipo'] = tipo_global
 
-            # 2. DETECCIÓN DE PARTIDOS INCOMPLETOS (Sin fecha o sin hora)
-            # Consideramos error si es NaN o si el texto es vacío/nan
+            # 2. DETECCIÓN DE PARTIDOS INCOMPLETOS (Corregido para evitar error 'lower')
+            # Usamos .str.lower() que es la forma correcta de aplicar minúsculas a una columna de Pandas
             df['Error_Horario'] = (
-                df['Fecha'].isna() | (df['Fecha'].astype(str).str.strip().lower() == 'nan') |
-                df['Hora'].isna() | (df['Hora'].astype(str).str.strip().lower() == 'nan')
+                df['Fecha'].isna() | (df['Fecha'].astype(str).str.strip().str.lower() == 'nan') |
+                df['Hora'].isna() | (df['Hora'].astype(str).str.strip().str.lower() == 'nan')
             )
             
             partidos_con_error = df[df['Error_Horario']].copy()
@@ -99,7 +99,6 @@ def pagina_validacion():
                 info_comp = normalizar_texto(fila.get('Competición', ''))
                 minutos = duracion_defecto
                 
-                # Buscamos si la competición coincide con alguna categoría guardada
                 for _, cat in df_db_cats.iterrows():
                     if normalizar_texto(cat['palabra_clave']) in info_comp:
                         minutos = cat['duracion_minutos']
@@ -116,11 +115,15 @@ def pagina_validacion():
             df_val['capacidad_f11'] = df_val['capacidad_f11'].fillna(0)
             df_val['capacidad_f7'] = df_val['capacidad_f7'].fillna(0)
             
-            # Calculamos tiempos
-            df_val['Inicio'] = pd.to_datetime(df_val['Fecha'].astype(str) + ' ' + df_val['Hora'].astype(str), dayfirst=True, errors='coerce')
+            # Calculamos tiempos (usamos .astype(str) para evitar errores de concatenación)
+            df_val['Inicio'] = pd.to_datetime(
+                df_val['Fecha'].astype(str) + ' ' + df_val['Hora'].astype(str), 
+                dayfirst=True, 
+                errors='coerce'
+            )
             df_val['Fin'] = df_val.apply(obtener_fin, axis=1)
 
-            # 5. RENDERIZADO DE ALERTAS CRÍTICAS (Partidos sin horario)
+            # 5. RENDERIZADO DE ALERTAS CRÍTICAS
             if not partidos_con_error.empty:
                 with st.container():
                     st.error(f"🚨 Se han detectado {len(partidos_con_error)} partidos con datos de horario incompletos:")
@@ -128,7 +131,7 @@ def pagina_validacion():
                         st.warning(f"**ID: {p.get('Código Partido', 'S/C')}** | {p['Equipo Casa']} vs {p['Equipo Visitante']} (Campo: {p['Campo']})")
                 st.divider()
 
-            # Quitamos los errores del flujo principal para que no rompan el algoritmo de solapamientos
+            # Quitamos los errores para el algoritmo de solapamientos
             df_clean = df_val.dropna(subset=['Inicio', 'Fin']).copy()
 
             # 6. ALGORITMO DE DETECCIÓN DE CONFLICTOS
@@ -143,7 +146,6 @@ def pagina_validacion():
                     eventos.append((p['Inicio'], 1, p))
                     eventos.append((p['Fin'], -1, p))
                 
-                # Ordenar por tiempo; si el tiempo coincide, procesar salidas (-1) antes que entradas (1)
                 eventos.sort(key=lambda x: (x[0], x[1]))
                 
                 activos = []
@@ -154,15 +156,13 @@ def pagina_validacion():
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
-                    # Contadores actuales en el campo
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
 
-                    # Reglas de conflicto
                     es_conflicto = False
-                    if (nf11 > c11_m): es_conflicto = True  # Supera F11
-                    elif (nf11 >= 1 and nf7 > 0): es_conflicto = True  # Mezcla F11 y F7
-                    elif (nf11 == 0 and nf7 > c7_m): es_conflicto = True  # Supera F7
+                    if (nf11 > c11_m): es_conflicto = True
+                    elif (nf11 >= 1 and nf7 > 0): es_conflicto = True
+                    elif (nf11 == 0 and nf7 > c7_m): es_conflicto = True
                     
                     if es_conflicto and activos:
                         conflictos.append({
@@ -173,12 +173,11 @@ def pagina_validacion():
                             "activos": list(activos)
                         })
 
-            # 7. RENDERIZADO DE CONFLICTOS (Expanders con Contraste)
+            # 7. RENDERIZADO DE CONFLICTOS
             st.subheader("Análisis de Ocupación")
             if conflictos:
                 vistos = set()
                 for i, c in enumerate(conflictos):
-                    # Evitamos duplicar el mismo grupo de partidos en el mismo campo
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
@@ -189,7 +188,6 @@ def pagina_validacion():
                             col_info, col_btn = st.columns([0.8, 0.2])
                             with col_info:
                                 st.write(f"Capacidad DB -> **F11: {c['c11']}** | **F7: {c['c7']}**")
-                                st.write(f"Partidos solapados:")
                             with col_btn:
                                 if st.button("📝 Ajustar Campo", key=f"btn_val_{i}"):
                                     modal_campo(c['campo'], c['c11'], c['c7'])
@@ -204,11 +202,11 @@ def pagina_validacion():
                                         </span>
                                         <span class='{badge_class}'>{p['Tipo']}</span>
                                     </div>
-                                """, unsafe_allow_allow_html=True)
+                                """, unsafe_allow_html=True)
             elif partidos_con_error.empty:
                 st.success("✅ Validación completada: Todos los partidos tienen horario y respetan la capacidad de los campos.")
             else:
-                st.info("No se detectaron solapamientos, pero revisa los partidos con errores de fecha/hora listados arriba.")
+                st.info("No se detectaron solapamientos, pero revisa los partidos con errores listados arriba.")
 
         except Exception as e:
             st.error(f"Error crítico en la validación: {e}")
