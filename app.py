@@ -54,14 +54,28 @@ def guardar_campo(nombre, capacidad):
     st.cache_data.clear()
 
 # --- 4. DIÁLOGOS ---
-
-@st.dialog("Configurar Instalación")
-def modal_campo(nombre, c11=0, c7=0):
-    st.write(f"Campo: **{nombre}**")
-    nc11 = st.number_input("Capacidad F11", min_value=0, value=int(c11))
-    nc7 = st.number_input("Capacidad F7", min_value=0, value=int(c7))
-    if st.button("Guardar"):
-        guardar_campo(nombre, nc11, nc7)
+@st.dialog("Configurar Capacidad de Instalación")
+def modal_campo(nombre, capacidad_actual=1.0):
+    st.write(f"Ajustando capacidad para: **{nombre}**")
+    st.info("Unidad de medida: 1 partido de F11 = 1.0")
+    
+    # Usamos number_input con formato float y saltos de 0.25
+    nueva_capacidad = st.number_input(
+        "Capacidad Total (F11)", 
+        min_value=0.0, 
+        max_value=10.0, 
+        value=float(capacidad_actual),
+        step=0.25,
+        help="Ejemplos: 1.0 (1 campo F11), 1.5 (1 F11 + 1 F7), 0.5 (Solo 1 F7)"
+    )
+    
+    col1, col2 = st.columns(2)
+    if col1.button("Cancelar", use_container_width=True):
+        st.rerun()
+        
+    if col2.button("Guardar", type="primary", use_container_width=True):
+        guardar_campo(nombre, nueva_capacidad)
+        st.success(f"Capacidad de {nombre} actualizada a {nueva_capacidad}")
         st.rerun()
 
 def pagina_categorias():
