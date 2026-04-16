@@ -144,17 +144,21 @@ def pagina_validacion():
             df.columns = df.columns.str.strip()
             df['Campo'] = df['Campo'].astype(str).str.strip()
 
-            # --- NUEVA LÓGICA: FILTRAR PARTIDOS CON RESULTADO (YA JUGADOS) ---
-            # Si la columna 'Resultado' existe, buscamos filas que contengan algún dígito (\d)
+            # --- FILTROS DE EXCLUSIÓN (RESULTADOS Y FS) ---
+            # 1. Filtrar por Resultado (Partidos ya jugados)
             if 'Resultado' in df.columns:
-                # Creamos una máscara para identificar los que tienen números
                 tiene_resultado = df['Resultado'].astype(str).str.contains(r'\d', na=False)
-                num_finalizados = tiene_resultado.sum()
-                
-                if num_finalizados > 0:
-                    st.info(f"ℹ️ Se han omitido {num_finalizados} partidos porque ya tienen un resultado anotado.")
+                if tiene_resultado.any():
+                    st.info(f"ℹ️ Omitidos {tiene_resultado.sum()} partidos con resultado anotado.")
                     df = df[~tiene_resultado].copy()
-            # ----------------------------------------------------------------
+
+            # 2. Filtrar por Fútbol Sala (Contiene "FS" en Competición)
+            if 'Competición' in df.columns:
+                es_fs = df['Competición'].astype(str).str.upper().str.contains(r'\bFS\b| FS|FS ', na=False)
+                if es_fs.any():
+                    st.info(f"⚽ Omitidos {es_fs.sum()} partidos de Fútbol Sala (FS).")
+                    df = df[~es_fs].copy()
+            # -----------------------------------------------
 
             # 2. LÓGICA DE DETECCIÓN (Categoría, Tiempos, Tipo)
             def detectar_parametros(fila):
