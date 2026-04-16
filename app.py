@@ -144,16 +144,26 @@ def pagina_validacion():
             df.columns = df.columns.str.strip()
             df['Campo'] = df['Campo'].astype(str).str.strip()
 
-            # 2. LÓGICA DE DETECCIÓN MEJORADA (Evita el UnboundLocalError)
+            # --- NUEVA LÓGICA: FILTRAR PARTIDOS CON RESULTADO (YA JUGADOS) ---
+            # Si la columna 'Resultado' existe, buscamos filas que contengan algún dígito (\d)
+            if 'Resultado' in df.columns:
+                # Creamos una máscara para identificar los que tienen números
+                tiene_resultado = df['Resultado'].astype(str).str.contains(r'\d', na=False)
+                num_finalizados = tiene_resultado.sum()
+                
+                if num_finalizados > 0:
+                    st.info(f"ℹ️ Se han omitido {num_finalizados} partidos porque ya tienen un resultado anotado.")
+                    df = df[~tiene_resultado].copy()
+            # ----------------------------------------------------------------
+
+            # 2. LÓGICA DE DETECCIÓN (Categoría, Tiempos, Tipo)
             def detectar_parametros(fila):
-                # Inicializamos SIEMPRE las variables al principio
                 minutos = duracion_defecto
                 tipo_espacio = tipo_emergencia
                 nombre_cat_detectada = "Genérica / No definida"
                 
                 info_comp = normalizar_texto(fila.get('Competición', ''))
                 
-                # Búsqueda de categoría
                 if not df_db_cats.empty:
                     for _, cat in df_db_cats.iterrows():
                         palabra = normalizar_texto(cat['palabra_clave'])
@@ -163,7 +173,6 @@ def pagina_validacion():
                             nombre_cat_detectada = cat['palabra_clave']
                             break
                 
-                # Procesamiento de tiempos
                 f_val = str(fila['Fecha']).strip().lower()
                 h_val = str(fila['Hora']).strip().lower()
                 
@@ -175,16 +184,14 @@ def pagina_validacion():
                 
                 return pd.Series([inicio, fin, tipo_espacio, pd.isna(inicio), nombre_cat_detectada])
 
-            # Aplicamos la función (5 columnas de salida)
             df[['Inicio', 'Fin', 'Tipo', 'Error_Horario', 'Nombre_Cat']] = df.apply(detectar_parametros, axis=1)
             
             # 3. Cruce con Capacidad Decimal
             df_val = pd.merge(df, df_db_campos, left_on='Campo', right_on='nombre', how='left')
-            # Si no existe capacidad_total en la DB, asumimos 1.0 (1 campo F11)
             col_capacidad = 'capacidad_total' if 'capacidad_total' in df_val.columns else 'capacidad_f11'
             df_val['cap_act'] = pd.to_numeric(df_val[col_capacidad], errors='coerce').fillna(1.0)
             
-            # 4. Alertas de Errores Críticos
+            # 4. Alertas de Errores Críticos (Horarios incompletos)
             partidos_con_error = df_val[df_val['Error_Horario'] == True]
             if not partidos_con_error.empty:
                 st.error(f"🚨 {len(partidos_con_error)} partidos con horario incompleto.")
@@ -213,7 +220,6 @@ def pagina_validacion():
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
-                    # Consumo: F11=1.0, F7=0.5, Debutante=0.25
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
                     ndeb = len([p for p in activos if p['Tipo'] == "Debutante"])
@@ -226,7 +232,7 @@ def pagina_validacion():
                         })
 
             # 6. Render de Resultados
-            st.subheader("Estado de las Instalaciones")
+            st.subheader("Análisis de Ocupación Real")
             if conflictos:
                 vistos = set()
                 for i, c in enumerate(conflictos):
@@ -242,7 +248,7 @@ def pagina_validacion():
                                 b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
                                 st.markdown(f"""
                                     <div class='match-box'>
-                                        <div style='display: flex; flex-direction: column;'>
+                                        <div style='flex-direction: column; display: flex;'>
                                             <span class='match-text'>
                                                 <span class='code-badge'>{p.get('Código Partido','S/C')}</span>
                                                 <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
@@ -255,7 +261,7 @@ def pagina_validacion():
                                     </div>
                                 """, unsafe_allow_html=True)
             else:
-                st.success("✅ Todo correcto.")
+                st.success("✅ Todo correcto. Los partidos planificados encajan en los campos.")
 
         except Exception as e:
             st.error(f"Error crítico en la validación: {e}")
