@@ -119,7 +119,7 @@ def pagina_validacion():
     
     with st.sidebar:
         st.header("Ajustes de Emergencia")
-        st.info("Estos valores se usan solo si la competición no coincide con ninguna categoría de la base de datos.")
+        st.info("Se usan si la competición no coincide con ninguna categoría en la DB.")
         tipo_emergencia = st.selectbox("Tipo por defecto:", ["F11", "F7", "Debutante"])
         duracion_defecto = st.number_input("Duración por defecto (min):", value=105)
 
@@ -127,15 +127,14 @@ def pagina_validacion():
     
     if archivo:
         try:
-            # 1. Carga de configuraciones desde DB
+            # 1. Carga de configuraciones
             df_db_campos = cargar_db("campos")
             df_db_cats = cargar_db("categorias")
             
-            # Ordenamos categorías por longitud (descendente) para evitar conflictos (ej: PREBENJAMIN vs BENJAMIN)
             if not df_db_cats.empty:
                 df_db_cats['longitud'] = df_db_cats['palabra_clave'].str.len()
                 df_db_cats = df_db_cats.sort_values(by='longitud', ascending=False)
-            # 2. Lectura del CSV
+            
             try:
                 df = pd.read_csv(archivo, sep=';', encoding='utf-8')
             except:
@@ -145,135 +144,118 @@ def pagina_validacion():
             df.columns = df.columns.str.strip()
             df['Campo'] = df['Campo'].astype(str).str.strip()
 
-            # 3. LÓGICA DE DETECCIÓN INTELIGENTE (Tiempo y Tipo de Espacio)
+            # 2. LÓGICA DE DETECCIÓN MEJORADA (Evita el UnboundLocalError)
             def detectar_parametros(fila):
-                info_comp = normalizar_texto(fila.get('Competición', ''))
-                
-                # Valores iniciales (emergencia)
+                # Inicializamos SIEMPRE las variables al principio
                 minutos = duracion_defecto
                 tipo_espacio = tipo_emergencia
+                nombre_cat_detectada = "Genérica / No definida"
                 
-                # Buscamos en la tabla de categorías
-                for _, cat in df_db_cats.iterrows():
-                    if normalizar_texto(cat['palabra_clave']) in info_comp:
-                        minutos = cat['duracion_minutos']
-                        tipo_espacio = cat.get('tipo_campo', 'F11') # F11 por defecto si la columna no existe
-                        nombre_categoria = cat['palabra_clave']
-                        break
+                info_comp = normalizar_texto(fila.get('Competición', ''))
                 
-                # Procesamiento de fechas para evitar errores de concatenación
+                # Búsqueda de categoría
+                if not df_db_cats.empty:
+                    for _, cat in df_db_cats.iterrows():
+                        palabra = normalizar_texto(cat['palabra_clave'])
+                        if palabra in info_comp:
+                            minutos = int(cat['duracion_minutos'])
+                            tipo_espacio = cat.get('tipo_campo', 'F11')
+                            nombre_cat_detectada = cat['palabra_clave']
+                            break
+                
+                # Procesamiento de tiempos
                 f_val = str(fila['Fecha']).strip().lower()
                 h_val = str(fila['Hora']).strip().lower()
                 
-                if f_val == "nan" or h_val == "nan" or not f_val or not h_val:
-                    return pd.Series([pd.NaT, pd.NaT, tipo_espacio, True])
+                if f_val in ["nan", ""] or h_val in ["nan", ""]:
+                    return pd.Series([pd.NaT, pd.NaT, tipo_espacio, True, nombre_cat_detectada])
                 
                 inicio = pd.to_datetime(f_val + ' ' + h_val, dayfirst=True, errors='coerce')
                 fin = inicio + timedelta(minutes=minutos) if pd.notna(inicio) else pd.NaT
                 
-                return pd.Series([inicio, fin, tipo_espacio, pd.isna(inicio), nombre_categoria])
+                return pd.Series([inicio, fin, tipo_espacio, pd.isna(inicio), nombre_cat_detectada])
 
-            # Aplicamos la detección a todo el DataFrame
+            # Aplicamos la función (5 columnas de salida)
             df[['Inicio', 'Fin', 'Tipo', 'Error_Horario', 'Nombre_Cat']] = df.apply(detectar_parametros, axis=1)
             
-            # 4. Cruce con Capacidad de Campos
+            # 3. Cruce con Capacidad Decimal
             df_val = pd.merge(df, df_db_campos, left_on='Campo', right_on='nombre', how='left')
-            df_val['capacidad_f11'] = df_val['capacidad_f11'].fillna(0)
+            # Si no existe capacidad_total en la DB, asumimos 1.0 (1 campo F11)
+            col_capacidad = 'capacidad_total' if 'capacidad_total' in df_val.columns else 'capacidad_f11'
+            df_val['cap_act'] = pd.to_numeric(df_val[col_capacidad], errors='coerce').fillna(1.0)
             
-            # 5. Render de Alertas Críticas (Partidos sin fecha/hora)
+            # 4. Alertas de Errores Críticos
             partidos_con_error = df_val[df_val['Error_Horario'] == True]
             if not partidos_con_error.empty:
-                st.error(f"🚨 Se han detectado {len(partidos_con_error)} partidos con datos de horario incompletos:")
+                st.error(f"🚨 {len(partidos_con_error)} partidos con horario incompleto.")
                 for _, p in partidos_con_error.iterrows():
-                    st.warning(f"**ID: {p.get('Código Partido', 'S/C')}** | {p['Equipo Casa']} vs {p['Equipo Visitante']} (Campo: {p['Campo']})")
+                    st.warning(f"ID: {p.get('Código Partido','S/C')} | {p['Equipo Casa']} vs {p['Equipo Visitante']}")
                 st.divider()
 
-            # Quitamos errores para el algoritmo
             df_clean = df_val.dropna(subset=['Inicio', 'Fin']).copy()
 
-            # 6. ALGORITMO DE FRACCIONES DE ESPACIO (Matemático)
+            # 5. Algoritmo de Fracciones de Espacio
             conflictos = []
             for campo in df_clean['Campo'].unique():
                 df_c = df_clean[df_clean['Campo'] == campo].sort_values('Inicio')
-                num_campos_f11 = int(df_c['capacidad_f11'].iloc[0])
+                cap_max = float(df_c['cap_act'].iloc[0])
                 
                 eventos = []
                 for _, p in df_c.iterrows():
                     eventos.append((p['Inicio'], 1, p))
                     eventos.append((p['Fin'], -1, p))
-                
-                # Ordenar por tiempo; si coincide, salidas (-1) antes que entradas (1)
                 eventos.sort(key=lambda x: (x[0], x[1]))
                 
                 activos = []
                 for t, estado, p_data in eventos:
-                    if estado == 1: 
-                        activos.append(p_data)
+                    if estado == 1: activos.append(p_data)
                     else:
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
-                    # 1. Contamos activos por tipo
+                    # Consumo: F11=1.0, F7=0.5, Debutante=0.25
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
                     ndeb = len([p for p in activos if p['Tipo'] == "Debutante"])
-                    
-                    # 2. Obtenemos la capacidad total de la instalación (ej: 1.5)
-                    cap_max = float(df_c['capacidad_total'].iloc[0])
-                    
-                    # 3. Sumamos el consumo de espacio
-                    # F11 (1.0) | F7 (0.5) | Debutante (0.25)
-                    consumo_actual = (nf11 * 1.0) + (nf7 * 0.5) + (ndeb * 0.25)
-                    
-                    # 4. Verificamos conflicto
-                    if consumo_actual > cap_max:
+                    consumo = (nf11 * 1.0) + (nf7 * 0.5) + (ndeb * 0.25)
+
+                    if consumo > cap_max and activos:
                         conflictos.append({
-                            "campo": campo, 
-                            "cap": cap_max, 
-                            "uso": consumo_actual,
-                            "hora": t.strftime('%H:%M'), 
-                            "activos": list(activos)
+                            "campo": campo, "cap": cap_max, "uso": consumo,
+                            "hora": t.strftime('%H:%M'), "activos": list(activos)
                         })
 
-            # 7. RENDERIZADO DE RESULTADOS
-            st.subheader("Análisis de Ocupación Real")
+            # 6. Render de Resultados
+            st.subheader("Estado de las Instalaciones")
             if conflictos:
                 vistos = set()
                 for i, c in enumerate(conflictos):
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
-                        
-                        with st.expander(f"⚠️ {c['campo']} | Sobreocupación a las {c['hora']}", expanded=False):
+                        with st.expander(f"⚠️ {c['campo']} | Ocupación {c['uso']} de {c['cap']} a las {c['hora']}", expanded=False):
                             c1, c2 = st.columns([0.8, 0.2])
-                            c1.markdown(f"Capacidad: **{c['cap']} campos F11** | Ocupación: **{c['uso']}**")
-                            if c2.button("📝 Ajustar Capacidad", key=f"btn_v_{i}"):
+                            if c2.button("📝 Ajustar", key=f"btn_v_{i}"):
                                 modal_campo(c['campo'], c['cap'])
                             
-                            # --- DENTRO DEL RENDERIZADO DE CONFLICTOS ---
-                        for p in c['activos']:
-                            # Selección de badge según el tipo
-                            b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
-                            
-                            # HTML de la tarjeta con la categoría incluida
-                            st.markdown(f"""
-                                <div class='match-box'>
-                                    <div style='display: flex; flex-direction: column;'>
-                                        <span class='match-text'>
-                                            <span class='code-badge'>{p.get('Código Partido','S/C')}</span>
-                                            <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
-                                        </span>
-                                        <span style='font-size: 0.85rem; color: #6b7280; margin-left: 5px;'>
-                                            🏷️ Categoría: <b>{p['Nombre_Cat']}</b>
-                                        </span>
+                            for p in c['activos']:
+                                b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
+                                st.markdown(f"""
+                                    <div class='match-box'>
+                                        <div style='display: flex; flex-direction: column;'>
+                                            <span class='match-text'>
+                                                <span class='code-badge'>{p.get('Código Partido','S/C')}</span>
+                                                <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
+                                            </span>
+                                            <span style='font-size: 0.85rem; color: #6b7280; margin-left: 5px;'>
+                                                🏷️ {p['Nombre_Cat']}
+                                            </span>
+                                        </div>
+                                        <span class='{b}'>{p['Tipo']}</span>
                                     </div>
-                                    <span class='{b}'>{p['Tipo']}</span>
-                                </div>
-                            """, unsafe_allow_html=True)
-            elif partidos_con_error.empty:
-                st.success("✅ Validación completada: Todos los partidos encajan perfectamente en los campos asignados.")
+                                """, unsafe_allow_html=True)
             else:
-                st.info("No hay solapamientos, pero revisa los partidos con datos incompletos arriba.")
+                st.success("✅ Todo correcto.")
 
         except Exception as e:
             st.error(f"Error crítico en la validación: {e}")
