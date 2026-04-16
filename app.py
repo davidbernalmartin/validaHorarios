@@ -135,7 +135,7 @@ def pagina_validacion():
             if not df_db_cats.empty:
                 df_db_cats['longitud'] = df_db_cats['palabra_clave'].str.len()
                 df_db_cats = df_db_cats.sort_values(by='longitud', ascending=False)
-            
+            st.info(df_db_cats)
             # 2. Lectura del CSV
             try:
                 df = pd.read_csv(archivo, sep=';', encoding='utf-8')
