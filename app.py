@@ -33,15 +33,26 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- 3. LÓGICA DE BASE DE DATOS ---
-
 @st.cache_data(ttl=60)
 def cargar_db(tabla):
-    res = supabase.table(tabla).select("*").execute()
-    return pd.DataFrame(res.data)
+    try:
+        res = supabase.table(tabla).select("*").execute()
+        df = pd.DataFrame(res.data)
+        if df.empty:
+            if tabla == "campos": return pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7', 'capacidad_debutante'])
+            if tabla == "categorias": return pd.DataFrame(columns=['palabra_clave', 'duracion_minutos'])
+        return df
+    except:
+        if tabla == "campos": return pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7', 'capacidad_debutante'])
+        return pd.DataFrame(columns=['palabra_clave', 'duracion_minutos'])
 
-def guardar_campo(nombre, c11, c7):
-    supabase.table("campos").upsert({"nombre": nombre, "capacidad_f11": c11, "capacidad_f7": c7}, on_conflict="nombre").execute()
+def guardar_campo(nombre, c11, c7, cdeb):
+    supabase.table("campos").upsert({
+        "nombre": nombre, 
+        "capacidad_f11": c11, 
+        "capacidad_f7": c7,
+        "capacidad_debutante": cdeb
+    }, on_conflict="nombre").execute()
     st.cache_data.clear()
 
 # --- 4. DIÁLOGOS ---
