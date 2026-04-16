@@ -46,12 +46,10 @@ def cargar_db(tabla):
         if tabla == "campos": return pd.DataFrame(columns=['nombre', 'capacidad_f11', 'capacidad_f7', 'capacidad_debutante'])
         return pd.DataFrame(columns=['palabra_clave', 'duracion_minutos'])
 
-def guardar_campo(nombre, c11, c7, cdeb):
+def guardar_campo(nombre, capacidad):
     supabase.table("campos").upsert({
         "nombre": nombre, 
-        "capacidad_f11": c11, 
-        "capacidad_f7": c7,
-        "capacidad_debutante": cdeb
+        "capacidad_total": float(capacidad)
     }, on_conflict="nombre").execute()
     st.cache_data.clear()
 
@@ -201,18 +199,26 @@ def pagina_validacion():
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
-                    # Cálculo de consumo basado en la unidad F11
+                    # 1. Contamos activos por tipo
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
                     ndeb = len([p for p in activos if p['Tipo'] == "Debutante"])
-
-                    # F11=1, F7=0.5, Debutante=0.25
-                    consumo = (nf11 * 1.0) + (nf7 * 0.5) + (ndeb * 0.25)
-
-                    if consumo > num_campos_f11 and activos:
+                    
+                    # 2. Obtenemos la capacidad total de la instalación (ej: 1.5)
+                    cap_max = float(df_c['capacidad_total'].iloc[0])
+                    
+                    # 3. Sumamos el consumo de espacio
+                    # F11 (1.0) | F7 (0.5) | Debutante (0.25)
+                    consumo_actual = (nf11 * 1.0) + (nf7 * 0.5) + (ndeb * 0.25)
+                    
+                    # 4. Verificamos conflicto
+                    if consumo_actual > cap_max:
                         conflictos.append({
-                            "campo": campo, "cap": num_campos_f11, "uso": consumo,
-                            "hora": t.strftime('%H:%M'), "activos": list(activos)
+                            "campo": campo, 
+                            "cap": cap_max, 
+                            "uso": consumo_actual,
+                            "hora": t.strftime('%H:%M'), 
+                            "activos": list(activos)
                         })
 
             # 7. RENDERIZADO DE RESULTADOS
@@ -250,14 +256,17 @@ def pagina_validacion():
         except Exception as e:
             st.error(f"Error crítico en la validación: {e}")
 
-# --- 6. PÁGINA: GESTIÓN DE CAMPOS ---
 def pagina_campos():
-    st.title("🏟️ Maestro de Campos")
+    st.title("🏟️ Maestro de Instalaciones")
     df = cargar_db("campos")
-    ed = st.data_editor(df[['nombre', 'capacidad_f11', 'capacidad_f7']], num_rows="dynamic", use_container_width=True, hide_index=True)
+    # Aseguramos que la columna existe
+    if 'capacidad_total' not in df.columns: df['capacidad_total'] = 1.0
+    
+    ed = st.data_editor(df[['nombre', 'capacidad_total']], num_rows="dynamic", use_container_width=True, hide_index=True)
     if st.button("Guardar Cambios"):
-        for _, f in ed.iterrows(): guardar_campo(f['nombre'], f['capacidad_f11'], f['capacidad_f7'])
-        st.success("Base de datos de campos actualizada.")
+        for _, f in ed.iterrows(): 
+            guardar_campo(f['nombre'], f['capacidad_total'])
+        st.success("Capacidades actualizadas.")
 
 # --- 7. PÁGINA: GESTIÓN DE CATEGORÍAS ---
 def pagina_categorias():
