@@ -158,6 +158,7 @@ def pagina_validacion():
                     if normalizar_texto(cat['palabra_clave']) in info_comp:
                         minutos = cat['duracion_minutos']
                         tipo_espacio = cat.get('tipo_campo', 'F11') # F11 por defecto si la columna no existe
+                        nombre_categoria = cat['palabra_clave']
                         break
                 
                 # Procesamiento de fechas para evitar errores de concatenación
@@ -170,10 +171,10 @@ def pagina_validacion():
                 inicio = pd.to_datetime(f_val + ' ' + h_val, dayfirst=True, errors='coerce')
                 fin = inicio + timedelta(minutes=minutos) if pd.notna(inicio) else pd.NaT
                 
-                return pd.Series([inicio, fin, tipo_espacio, pd.isna(inicio)])
+                return pd.Series([inicio, fin, tipo_espacio, pd.isna(inicio), nombre_categoria])
 
             # Aplicamos la detección a todo el DataFrame
-            df[['Inicio', 'Fin', 'Tipo', 'Error_Horario']] = df.apply(detectar_parametros, axis=1)
+            df[['Inicio', 'Fin', 'Tipo', 'Error_Horario', 'Nombre_Cat']] = df.apply(detectar_parametros, axis=1)
             
             # 4. Cruce con Capacidad de Campos
             df_val = pd.merge(df, df_db_campos, left_on='Campo', right_on='nombre', how='left')
@@ -249,18 +250,26 @@ def pagina_validacion():
                             if c2.button("📝 Ajustar Capacidad", key=f"btn_v_{i}"):
                                 modal_campo(c['campo'], c['cap'])
                             
-                            for p in c['activos']:
-                                # Selección de badge según el tipo autodetectado
-                                b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
-                                st.markdown(f"""
-                                    <div class='match-box'>
+                            # --- DENTRO DEL RENDERIZADO DE CONFLICTOS ---
+                        for p in c['activos']:
+                            # Selección de badge según el tipo
+                            b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
+                            
+                            # HTML de la tarjeta con la categoría incluida
+                            st.markdown(f"""
+                                <div class='match-box'>
+                                    <div style='display: flex; flex-direction: column;'>
                                         <span class='match-text'>
                                             <span class='code-badge'>{p.get('Código Partido','S/C')}</span>
                                             <b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}
                                         </span>
-                                        <span class='{b}'>{p['Tipo']}</span>
+                                        <span style='font-size: 0.85rem; color: #6b7280; margin-left: 5px;'>
+                                            🏷️ Categoría: <b>{p['Nombre_Cat']}</b>
+                                        </span>
                                     </div>
-                                """, unsafe_allow_html=True)
+                                    <span class='{b}'>{p['Tipo']}</span>
+                                </div>
+                            """, unsafe_allow_html=True)
             elif partidos_con_error.empty:
                 st.success("✅ Validación completada: Todos los partidos encajan perfectamente en los campos asignados.")
             else:
