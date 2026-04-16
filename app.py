@@ -71,33 +71,27 @@ def pagina_validacion():
     
     with st.sidebar:
         st.header("Configuración")
-        tipo_global = st.radio("Tipo de partidos en el CSV:", ["F11", "F7"])
-        duracion_defecto = st.number_input("Duración por defecto (si no hay categoría):", value=105)
+        tipo_global = st.radio("Tipo de partidos en el CSV:", ["F11", "F7", "Debutante"])
+        duracion_defecto = st.number_input("Duración por defecto (min):", value=105)
 
     archivo = st.file_uploader("Sube el CSV de Partidos", type=['csv'])
     
     if archivo:
         try:
-            # 1. Carga de datos
             df_db_campos = cargar_db("campos")
             df_db_cats = cargar_db("categorias")
             
-            # ORDENAMOS CATEGORÍAS POR LONGITUD DESCENDENTE (Clave para evitar el error PREBENJAMIN/BENJAMIN)
+            # Ordenar categorías por longitud para evitar solapamientos de nombres (Prebenjamín/Benjamín)
             if not df_db_cats.empty:
                 df_db_cats['longitud'] = df_db_cats['palabra_clave'].str.len()
                 df_db_cats = df_db_cats.sort_values(by='longitud', ascending=False)
             
-            try:
-                df = pd.read_csv(archivo, sep=';', encoding='utf-8')
-            except:
-                archivo.seek(0)
-                df = pd.read_csv(archivo, sep=';', encoding='latin-1')
-            
+            df = pd.read_csv(archivo, sep=';', encoding='latin-1') # Cambiar a utf-8 si falla
             df.columns = df.columns.str.strip()
             df['Campo'] = df['Campo'].astype(str).str.strip()
             df['Tipo'] = tipo_global
 
-            # 2. DETECCIÓN DE PARTIDOS INCOMPLETOS
+            # Detección de errores de fecha/hora
             df['Error_Horario'] = (
                 df['Fecha'].isna() | (df['Fecha'].astype(str).str.strip().str.lower() == 'nan') |
                 df['Hora'].isna() | (df['Hora'].astype(str).str.strip().str.lower() == 'nan')
@@ -105,85 +99,61 @@ def pagina_validacion():
             
             partidos_con_error = df[df['Error_Horario']].copy()
 
-            # 3. Función interna para calcular el fin de partido
             def obtener_fin(fila):
-                if fila['Error_Horario']: 
-                    return pd.NaT
-                
+                if fila['Error_Horario']: return pd.NaT
                 info_comp = normalizar_texto(fila.get('Competición', ''))
                 minutos = duracion_defecto
-                
-                # Buscamos coincidencias (ahora el bucle siempre verá PREBENJAMIN antes que BENJAMIN)
                 for _, cat in df_db_cats.iterrows():
-                    palabra_busqueda = normalizar_texto(cat['palabra_clave'])
-                    if palabra_busqueda in info_comp:
+                    if normalizar_texto(cat['palabra_clave']) in info_comp:
                         minutos = cat['duracion_minutos']
-                        break # En cuanto encuentra la más larga/específica, para.
-                
-                f_val = str(fila['Fecha']).strip()
-                h_val = str(fila['Hora']).strip()
-                
-                inicio = pd.to_datetime(f_val + ' ' + h_val, dayfirst=True, errors='coerce')
+                        break
+                inicio = pd.to_datetime(str(fila['Fecha']) + ' ' + str(fila['Hora']), dayfirst=True, errors='coerce')
                 return inicio + timedelta(minutes=minutos) if pd.notna(inicio) else pd.NaT
 
-            # 4. Procesamiento y Cruce con Campos
             df_val = pd.merge(df, df_db_campos, left_on='Campo', right_on='nombre', how='left')
             df_val['capacidad_f11'] = df_val['capacidad_f11'].fillna(0)
-            df_val['capacidad_f7'] = df_val['capacidad_f7'].fillna(0)
-            
-            df_val['Inicio'] = pd.to_datetime(
-                df_val['Fecha'].astype(str) + ' ' + df_val['Hora'].astype(str), 
-                dayfirst=True, 
-                errors='coerce'
-            )
+            df_val['Inicio'] = pd.to_datetime(df_val['Fecha'].astype(str) + ' ' + df_val['Hora'].astype(str), dayfirst=True, errors='coerce')
             df_val['Fin'] = df_val.apply(obtener_fin, axis=1)
-
-            # 5. RENDERIZADO DE ALERTAS CRÍTICAS
-            if not partidos_con_error.empty:
-                st.error(f"🚨 Se han detectado {len(partidos_con_error)} partidos con datos incompletos:")
-                for _, p in partidos_con_error.iterrows():
-                    st.warning(f"**ID: {p.get('Código Partido', 'S/C')}** | {p['Equipo Casa']} vs {p['Equipo Visitante']}")
-                st.divider()
-
             df_clean = df_val.dropna(subset=['Inicio', 'Fin']).copy()
 
-            # 6. ALGORITMO DE DETECCIÓN DE CONFLICTOS
+            # Render Alertas
+            if not partidos_con_error.empty:
+                st.error(f"🚨 {len(partidos_con_error)} partidos sin horario definido.")
+                st.divider()
+
+            # Algoritmo de Fracciones de Espacio
             conflictos = []
             for campo in df_clean['Campo'].unique():
                 df_c = df_clean[df_clean['Campo'] == campo].sort_values('Inicio')
-                c11_m = int(df_c['capacidad_f11'].iloc[0])
-                c7_m = int(df_c['capacidad_f7'].iloc[0])
+                num_campos_fisicos = int(df_c['capacidad_f11'].iloc[0])
                 
                 eventos = []
                 for _, p in df_c.iterrows():
                     eventos.append((p['Inicio'], 1, p))
                     eventos.append((p['Fin'], -1, p))
-                
                 eventos.sort(key=lambda x: (x[0], x[1]))
                 
                 activos = []
                 for t, tipo, p_data in eventos:
-                    if tipo == 1: 
-                        activos.append(p_data)
+                    if tipo == 1: activos.append(p_data)
                     else:
                         id_p = str(p_data.get('Código Partido', ''))
                         activos = [p for p in activos if str(p.get('Código Partido', '')) != id_p]
 
                     nf11 = len([p for p in activos if p['Tipo'] == "F11"])
                     nf7 = len([p for p in activos if p['Tipo'] == "F7"])
+                    ndeb = len([p for p in activos if p['Tipo'] == "Debutante"])
 
-                    es_conflicto = False
-                    if (nf11 > c11_m): es_conflicto = True
-                    elif (nf11 >= 1 and nf7 > 0): es_conflicto = True
-                    elif (nf11 == 0 and nf7 > c7_m): es_conflicto = True
-                    
-                    if es_conflicto and activos:
+                    # Cálculo matemático: F11=1, F7=0.5, Deb=0.25
+                    consumo = (nf11 * 1.0) + (nf7 * 0.5) + (ndeb * 0.25)
+
+                    if consumo > num_campos_fisicos and activos:
                         conflictos.append({
-                            "campo": campo, "c11": c11_m, "c7": c7_m, 
+                            "campo": campo, "cap": num_campos_fisicos, "uso": consumo,
                             "hora": t.strftime('%H:%M'), "activos": list(activos)
                         })
 
-            # 7. RENDERIZADO DE CONFLICTOS
+            # Render Conflictos
             st.subheader("Análisis de Ocupación")
             if conflictos:
                 vistos = set()
@@ -191,17 +161,21 @@ def pagina_validacion():
                     ids = tuple(sorted([str(p.get('Código Partido')) for p in c['activos']]))
                     if (c['campo'], ids) not in vistos:
                         vistos.add((c['campo'], ids))
-                        with st.expander(f"⚠️ {c['campo']} | Conflicto {c['hora']}", expanded=False):
+                        with st.expander(f"⚠️ {c['campo']} | Exceso de ocupación a las {c['hora']}", expanded=False):
                             c1, c2 = st.columns([0.8, 0.2])
-                            c1.write(f"Capacidad -> F11: {c['c11']} | F7: {c['c7']}")
-                            if c2.button("📝 Ajustar", key=f"btn_v_{i}"):
-                                modal_campo(c['campo'], c['c11'], c['c7'])
+                            c1.markdown(f"Capacidad: **{c['cap']} campos F11** | Ocupación actual: **{c['uso']}**")
+                            if c2.button("📝 Ajustar", key=f"v_btn_{i}"): modal_campo(c['campo'], c['cap'])
                             
                             for p in c['activos']:
-                                b = "badge-f11" if p['Tipo'] == "F11" else "badge-f7"
-                                st.markdown(f"<div class='match-box'><span class='match-text'><span class='code-badge'>{p.get('Código Partido','S/C')}</span><b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}</span><span class='{b}'>{p['Tipo']}</span></div>", unsafe_allow_html=True)
-            elif partidos_con_error.empty:
-                st.success("✅ Validación completada sin errores.")
+                                b = "badge-f11" if p['Tipo'] == "F11" else ("badge-f7" if p['Tipo'] == "F7" else "badge-deb")
+                                st.markdown(f"""
+                                    <div class='match-box'>
+                                        <span class='match-text'><span class='code-badge'>{p.get('Código Partido','S/C')}</span><b>{p['Hora']}</b>: {p['Equipo Casa']} vs {p['Equipo Visitante']}</span>
+                                        <span class='{b}'>{p['Tipo']}</span>
+                                    </div>
+                                """, unsafe_allow_html=True)
+            else:
+                st.success("✅ Todo correcto. Los solapamientos respetan la capacidad física.")
 
         except Exception as e:
             st.error(f"Error crítico: {e}")
